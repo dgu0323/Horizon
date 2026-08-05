@@ -24,8 +24,17 @@ from .scrapers.openbb import OpenBBScraper
 from .scrapers.ossinsight import OSSInsightScraper
 from .scrapers.gdelt import GDELTScraper
 from .scrapers.google_news import GoogleNewsScraper
+from .scrapers.agent_reach import AgentReachScraper
 from .ai.client import create_ai_client
 from .ai.analyzer import ContentAnalyzer
+from .ai.opportunity_analyzer import OpportunityAnalyzer
+from .ai.cache import (
+    apply_cached_analysis,
+    apply_cached_opportunity,
+    prune,
+    store_analysis,
+    store_opportunity,
+)
 from .ai.summarizer import DailySummarizer
 from .ai.enricher import ContentEnricher
 from .ai.tokens import get_usage_snapshot
@@ -228,6 +237,9 @@ class HorizonOrchestrator:
             analyzed_items = await self._analyze_content(merged_items)
             self.console.print(f"🤖 Analyzed {len(analyzed_items)} items with AI\n")
 
+            # 4.5 Score business opportunities (2nd analysis pass)
+            await self._analyze_opportunities(analyzed_items)
+
             # 5. Filter, deduplicate, and balance the digest
             filtering_result = await self.filter_items(
                 analyzed_items,
@@ -253,8 +265,12 @@ class HorizonOrchestrator:
             # 6. Search related stories + enrich with background knowledge (2nd AI pass)
             await self._enrich_important_items(important_items)
 
-            # 7. Generate and save daily summaries for each configured language
+            # 6.5 Persist selected items (incl. opportunity metadata) as JSON
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            items_path = self.storage.save_daily_items(today, important_items)
+            self.console.print(f"💾 Saved {len(important_items)} items to: {items_path}\n")
+
+            # 7. Generate and save daily summaries for each configured language
             for lang in self.config.ai.languages:
                 summarizer = DailySummarizer()
                 summary = await summarizer.generate_summary(important_items, today, len(all_items), language=lang)
@@ -425,6 +441,12 @@ class HorizonOrchestrator:
             if self.config.sources.google_news and self.config.sources.google_news.enabled:
                 gn_scraper = GoogleNewsScraper(self.config.sources.google_news, client)
                 tasks.append(self._fetch_with_progress("Google News", gn_scraper, since))
+
+            # Agent-Reach adapter (optional; degrades gracefully when unavailable)
+            ar_cfg = getattr(self.config.sources, "agent_reach", None)
+            if ar_cfg and ar_cfg.enabled:
+                ar_scraper = AgentReachScraper(ar_cfg, client)
+                tasks.append(self._fetch_with_progress("Agent-Reach", ar_scraper, since))
 
             # Fetch all concurrently
             outcomes = await asyncio.gather(*tasks)
@@ -869,6 +891,10 @@ class HorizonOrchestrator:
     async def _analyze_content(self, items: List[ContentItem]) -> List[ContentItem]:
         """Analyze content items with AI.
 
+        Items already analyzed in a previous run (per the cross-run cache in
+        ``data/analysis_cache.json``) reuse their cached results instead of
+        re-spending tokens.
+
         Args:
             items: Items to analyze
 
@@ -877,10 +903,70 @@ class HorizonOrchestrator:
         """
         self.console.print("🤖 Analyzing content with AI...")
 
-        ai_client = create_ai_client(self.config.ai)
-        analyzer = ContentAnalyzer(ai_client)
+        cache = prune(self.storage.load_analysis_cache())
+        uncached_items = []
+        for item in items:
+            if not apply_cached_analysis(item, cache):
+                uncached_items.append(item)
+        cache_hits = len(items) - len(uncached_items)
+        if cache_hits:
+            self.console.print(f"   ♻️  Reused cached analysis for {cache_hits} items")
 
-        return await analyzer.analyze_batch(items)
+        if uncached_items:
+            ai_client = create_ai_client(self.config.ai)
+            analyzer = ContentAnalyzer(ai_client)
+            await analyzer.analyze_batch(uncached_items)
+            for item in uncached_items:
+                store_analysis(item, cache)
+            self.storage.save_analysis_cache(cache)
+
+        return items
+
+    async def _analyze_opportunities(self, items: List[ContentItem]) -> None:
+        """Score business opportunity potential for qualifying items.
+
+        Runs the OpportunityAnalyzer on items whose news score meets
+        ``filtering.opportunity_min_news_score``; results are stored in
+        ``item.metadata["opportunity"]``. No-op when
+        ``filtering.opportunity_enabled`` is false. Cached opportunity
+        results from previous runs are reused.
+        """
+        filtering = self.config.filtering
+        if not filtering.opportunity_enabled:
+            return
+
+        candidates = [
+            item for item in items
+            if (item.ai_score or 0.0) >= filtering.opportunity_min_news_score
+        ]
+        if not candidates:
+            return
+
+        cache = prune(self.storage.load_analysis_cache())
+        uncached_candidates = []
+        for item in candidates:
+            if not apply_cached_opportunity(item, cache):
+                uncached_candidates.append(item)
+        cache_hits = len(candidates) - len(uncached_candidates)
+        if cache_hits:
+            self.console.print(
+                f"   ♻️  Reused cached opportunity scores for {cache_hits} items"
+            )
+
+        if not uncached_candidates:
+            return
+
+        self.console.print(
+            f"💡 Scoring business opportunities for {len(uncached_candidates)} items "
+            f"(news score ≥ {filtering.opportunity_min_news_score})..."
+        )
+        ai_client = create_ai_client(self.config.ai)
+        analyzer = OpportunityAnalyzer(ai_client)
+        await analyzer.analyze_batch(uncached_candidates)
+        for item in uncached_candidates:
+            store_opportunity(item, cache)
+        self.storage.save_analysis_cache(cache)
+        self.console.print("")
 
     async def _generate_summary(
         self,

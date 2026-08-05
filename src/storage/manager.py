@@ -127,6 +127,57 @@ class StorageManager:
 
         return filepath
 
+    def save_daily_items(self, date: str, items: list) -> Path:
+        """Persist the day's selected ContentItems as JSON for downstream consumers."""
+        filename = f"horizon-{date}-items.json"
+        filepath = safe_output_path(self.summaries_dir, filename)
+
+        content = json.dumps(
+            [item.model_dump(mode="json") for item in items],
+            indent=2,
+            ensure_ascii=False,
+        )
+        _atomic_write_text(filepath, f"{content}\n")
+
+        return filepath
+
+    def load_daily_items(self, date: str) -> list:
+        """Load items saved by save_daily_items; returns [] when absent or invalid."""
+        filepath = self.summaries_dir / f"horizon-{date}-items.json"
+        if not filepath.exists():
+            return []
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return []
+
+    def load_analysis_cache(self) -> dict:
+        """Load the cross-run AI analysis cache; returns an empty cache when absent/invalid."""
+        from ..ai.cache import empty_cache
+
+        cache_path = self.data_dir / "analysis_cache.json"
+        if not cache_path.exists():
+            return empty_cache()
+
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return empty_cache()
+        if not isinstance(data, dict) or not isinstance(data.get("items"), dict):
+            return empty_cache()
+        return data
+
+    def save_analysis_cache(self, cache: dict) -> Path:
+        """Persist the cross-run AI analysis cache."""
+        cache_path = safe_output_path(self.data_dir, "analysis_cache.json")
+        _atomic_write_text(
+            cache_path, json.dumps(cache, indent=2, ensure_ascii=False) + "\n"
+        )
+        return cache_path
+
     def load_subscribers(self) -> list:
         """Loads the list of email subscribers."""
         subscribers_path = self.data_dir / "subscribers.json"

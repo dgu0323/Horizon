@@ -14,6 +14,10 @@ _MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()<>#!|])")
 _MARKDOWN_BLOCK_START = re.compile(r"(?m)^( {0,3})(>|[-+] |\d+[.)] )")
 _URL_SAFE_CHARS = ":/?#[]@!$&'*,;=~%+"
 
+# Minimum opportunity score for the business-opportunity block to appear in
+# the digest; lower-scoring analyses stay in metadata but are not rendered.
+OPP_MIN_DISPLAY_SCORE = 4.0
+
 
 def _escape_markdown(value: object) -> str:
     """Render untrusted text literally while retaining its readable content."""
@@ -53,6 +57,15 @@ LABELS = {
         "discussion": "Discussion",
         "references": "References",
         "tags": "Tags",
+        "opportunity": "Business Opportunity",
+        "opp_reason": "Why it's an opportunity",
+        "opp_problem": "Problem",
+        "opp_target_user": "Target user",
+        "opp_mvp": "MVP",
+        "opp_distribution": "Distribution",
+        "opp_monetization": "Monetization",
+        "opp_counter_view": "Counter-view",
+        "opp_validation": "Fastest validation",
         "selected_items": "From {total} items, {selected} important content pieces were selected",
         "empty_analyzed": "Analyzed {total} items, but none met the importance threshold.",
         "empty_body": (
@@ -73,6 +86,15 @@ LABELS = {
         "discussion": "社区讨论",
         "references": "参考链接",
         "tags": "标签",
+        "opportunity": "商业机会",
+        "opp_reason": "机会判断",
+        "opp_problem": "问题",
+        "opp_target_user": "目标用户",
+        "opp_mvp": "MVP",
+        "opp_distribution": "获客渠道",
+        "opp_monetization": "变现方式",
+        "opp_counter_view": "反方观点",
+        "opp_validation": "最快验证",
         "selected_items": "从 {total} 条内容中筛选出 {selected} 条重要资讯。",
         "empty_analyzed": "已分析 {total} 条内容，但没有达到重要性阈值的条目。",
         "empty_body": (
@@ -283,6 +305,11 @@ class DailySummarizer:
             lines.append("")
             lines.append(f"**{labels['discussion']}**: {discussion}")
 
+        opportunity_block = self._format_opportunity(meta.get("opportunity"), labels, language)
+        if opportunity_block:
+            lines.append("")
+            lines.append(opportunity_block)
+
         if item.ai_tags:
             tags_str = ", ".join([f"`#{_escape_markdown(t)}`" for t in item.ai_tags])
             lines.append("")
@@ -292,6 +319,44 @@ class DailySummarizer:
         lines.append("---")
 
         return "\n".join(lines) + "\n\n"
+
+    def _format_opportunity(
+        self, opportunity: Optional[dict], labels: dict, language: str
+    ) -> Optional[str]:
+        """Render the business-opportunity block for an item, or None.
+
+        Only rendered when the opportunity score clears
+        ``OPP_MIN_DISPLAY_SCORE`` — low-scoring blocks are noise in a digest.
+        """
+        if not isinstance(opportunity, dict):
+            return None
+        try:
+            score = float(opportunity.get("score"))
+        except (TypeError, ValueError):
+            return None
+        if score < OPP_MIN_DISPLAY_SCORE:
+            return None
+
+        field_labels = [
+            ("reason", "opp_reason"),
+            ("problem", "opp_problem"),
+            ("target_user", "opp_target_user"),
+            ("mvp", "opp_mvp"),
+            ("distribution", "opp_distribution"),
+            ("monetization", "opp_monetization"),
+            ("counter_view", "opp_counter_view"),
+            ("validation_step", "opp_validation"),
+        ]
+        lines = [f"**💡 {labels['opportunity']}**: {score:g}/10"]
+        for key, label_key in field_labels:
+            value = str(opportunity.get(key) or "").strip()
+            if not value:
+                continue
+            value = _escape_markdown(value)
+            if language == "zh":
+                value = _pangu(value)
+            lines.append(f"- **{labels[label_key]}**: {value}")
+        return "\n".join(lines)
 
     def _generate_empty_summary(self, date: str, total_fetched: int, labels: dict) -> str:
         """Generate summary when no high-scoring items were found."""

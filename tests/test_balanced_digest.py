@@ -154,7 +154,7 @@ def test_run_applies_balanced_digest_before_enrichment(tmp_path, monkeypatch) ->
             },
         ),
     )
-    storage = SimpleNamespace()
+    storage = SimpleNamespace(save_daily_items=lambda date, items: None)
     orchestrator = HorizonOrchestrator(config, storage)
     items = [
         make_item("ai", 9.0, "ai"),
@@ -201,7 +201,7 @@ def test_run_balances_after_twitter_reanalysis(tmp_path, monkeypatch) -> None:
         sources=SourcesConfig(),
         filtering=FilteringConfig(ai_score_threshold=7.0, max_items=1),
     )
-    orchestrator = HorizonOrchestrator(config, SimpleNamespace())
+    orchestrator = HorizonOrchestrator(config, SimpleNamespace(save_daily_items=lambda date, items: None))
     items = [make_item("first", 9.0, "ai"), make_item("second", 8.0, "ai")]
     enriched_ids: list[str] = []
 

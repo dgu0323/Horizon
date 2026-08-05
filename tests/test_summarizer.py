@@ -207,3 +207,58 @@ def test_generate_summary_preserves_normal_http_links():
     assert "[Important Item 1](https://example.com/items/1)" in result
     assert "[Discussion](https://example.com/discuss?id=1#comments)" in result
     assert 'href="https://docs.example.com/path?q=one&amp;lang=en"' in result
+
+
+def _make_opportunity(score: float) -> dict:
+    return {
+        "score": score,
+        "reason": "Repeated complaints about existing tools",
+        "problem": "Founders waste hours on manual invoicing",
+        "target_user": "Solo SaaS founders",
+        "mvp": "A single-page invoice generator",
+        "distribution": "r/SaaS, HN Show",
+        "monetization": "$9/month subscription",
+        "counter_view": "Market is crowded",
+        "validation_step": "Post a landing page and DM 20 users",
+        "tags": ["micro-saas"],
+    }
+
+
+def test_summary_renders_opportunity_block_when_score_high_enough():
+    item = _make_item(1)
+    item.metadata["opportunity"] = _make_opportunity(8.0)
+
+    result = _run_async(DailySummarizer().generate_summary([item], "2026-04-25", 1, language="en"))
+
+    assert "**💡 Business Opportunity**: 8/10" in result
+    assert "- **Problem**: Founders waste hours on manual invoicing" in result
+    assert "- **Fastest validation**: Post a landing page and DM 20 users" in result
+
+
+def test_summary_renders_opportunity_block_in_chinese():
+    item = _make_item(1)
+    item.metadata["opportunity"] = _make_opportunity(6.5)
+
+    result = _run_async(DailySummarizer().generate_summary([item], "2026-04-25", 1, language="zh"))
+
+    assert "**💡 商业机会**: 6.5/10" in result
+    assert "**目标用户**" in result
+    assert "**最快验证**" in result
+
+
+def test_summary_hides_opportunity_block_below_display_threshold():
+    item = _make_item(1)
+    item.metadata["opportunity"] = _make_opportunity(3.0)
+
+    result = _run_async(DailySummarizer().generate_summary([item], "2026-04-25", 1, language="en"))
+
+    assert "Business Opportunity" not in result
+
+
+def test_summary_without_opportunity_metadata_is_unchanged():
+    item = _make_item(1)
+
+    result = _run_async(DailySummarizer().generate_summary([item], "2026-04-25", 1))
+
+    assert "Business Opportunity" not in result
+    assert "商业机会" not in result

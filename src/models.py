@@ -20,6 +20,7 @@ class SourceType(str, Enum):
     OSSINSIGHT = "ossinsight"
     GDELT = "gdelt"
     GOOGLE_NEWS = "google_news"
+    AGENT_REACH = "agent_reach"
 
 
 class SourceDefinition(NamedTuple):
@@ -41,6 +42,7 @@ SOURCE_REGISTRY = {
     SourceType.OSSINSIGHT.value: SourceDefinition("ossinsight"),
     SourceType.GDELT.value: SourceDefinition("gdelt"),
     SourceType.GOOGLE_NEWS.value: SourceDefinition("google_news"),
+    SourceType.AGENT_REACH.value: SourceDefinition("agent_reach", item_fields=("platforms",)),
 }
 
 
@@ -371,6 +373,37 @@ class GoogleNewsConfig(BaseModel):
     category: Optional[str] = None
 
 
+class AgentReachPlatformConfig(BaseModel):
+    """Configuration for one platform fetched through Agent-Reach."""
+
+    name: str  # currently supported by the adapter: "v2ex", "xueqiu"
+    enabled: bool = True
+    fetch_limit: int = 20
+    nodes: List[str] = Field(default_factory=list)  # v2ex only: extra nodes to pull
+    category: Optional[str] = None
+
+
+class AgentReachConfig(BaseModel):
+    """Agent-Reach adapter source configuration.
+
+    Agent-Reach (https://github.com/.../Agent-Reach) is an optional access
+    layer for hard-to-reach platforms. Only its channels with a real Python
+    data API are used here: V2EX (public JSON API, no credentials) and
+    Xueqiu (public endpoints, optional login cookie). Other Agent-Reach
+    platforms (Twitter/X, Reddit, Xiaohongshu, Bilibili, ...) are driven by
+    external CLIs plus login cookies and are intentionally not wired in.
+
+    The `agent_reach` package is an optional dependency. If it is not
+    importable, `agent_reach_path` (a local checkout of the Agent-Reach
+    repo) is appended to sys.path as a fallback; when neither works the
+    scraper no-ops with a warning instead of failing the run.
+    """
+
+    enabled: bool = False
+    agent_reach_path: Optional[str] = None  # local Agent-Reach repo checkout
+    platforms: List[AgentReachPlatformConfig] = Field(default_factory=list)
+
+
 class SourcesConfig(BaseModel):
     """All sources configuration."""
 
@@ -384,6 +417,7 @@ class SourcesConfig(BaseModel):
     ossinsight: OSSInsightConfig = Field(default_factory=OSSInsightConfig)
     gdelt: Optional[GDELTConfig] = None
     google_news: Optional[GoogleNewsConfig] = None
+    agent_reach: Optional[AgentReachConfig] = None
 
 
 class WebhookConfig(BaseModel):
@@ -487,6 +521,8 @@ class FilteringConfig(BaseModel):
     category_groups: Dict[str, CategoryGroupConfig] = Field(default_factory=dict)
     default_group: str = "other"
     default_group_limit: Optional[int] = Field(default=None, gt=0)
+    opportunity_enabled: bool = False  # run OpportunityAnalyzer pass after news analysis
+    opportunity_min_news_score: float = 5.0  # only score opportunities for items at or above this news score
 
 
 class Config(BaseModel):
