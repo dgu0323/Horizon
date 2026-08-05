@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -218,3 +219,162 @@ def test_config_parsing_and_registry() -> None:
 
 def test_config_absent_by_default() -> None:
     assert SourcesConfig().agent_reach is None
+
+
+# --------------------------------------------------------------------- #
+# bilibili (bili CLI subprocess)
+# --------------------------------------------------------------------- #
+
+
+def _bilibili_config(**overrides) -> AgentReachConfig:
+    platform = {
+        "name": "bilibili",
+        "enabled": True,
+        "fetch_limit": 5,
+        "keywords": ["独立开发", "AI工具"],
+    }
+    platform.update(overrides.pop("platform_overrides", {}))
+    return AgentReachConfig(enabled=True, platforms=[platform], **overrides)
+
+
+def _bilibili_video(bvid: str = "BV1VP7h6XEL5") -> dict:
+    return {
+        "id": bvid,
+        "bvid": bvid,
+        "title": "独立开发两种赚钱方式！99%的人没想明白！",
+        "author": "极海Channel",
+        "play": 18095,
+        "duration": "3:12",
+    }
+
+
+class _FakeProc:
+    """Minimal stand-in for asyncio.subprocess.Process."""
+
+    def __init__(self, stdout: bytes, returncode: int = 0) -> None:
+        self._stdout = stdout
+        self.returncode = returncode
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, b""
+
+    def kill(self) -> None:
+        pass
+
+
+def _patch_bili_search(monkeypatch: pytest.MonkeyPatch, results) -> None:
+    """Stub _run_bili_search: either a list of records per call or an exception."""
+
+    async def _fake(self, keyword, limit):
+        if isinstance(results, Exception):
+            raise results
+        return results
+
+    monkeypatch.setattr(AgentReachScraper, "_run_bili_search", _fake)
+
+
+def test_bilibili_video_mapped_to_content_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_bili_search(monkeypatch, [_bilibili_video()])
+
+    items = asyncio.run(_scraper(_bilibili_config()).fetch(SINCE))
+
+    # Two keywords, same stubbed result per keyword.
+    assert len(items) == 2
+    item = items[0]
+    assert item.id == "agent_reach:bilibili:BV1VP7h6XEL5"
+    assert item.source_type == SourceType.AGENT_REACH
+    assert item.title == "独立开发两种赚钱方式！99%的人没想明白！"
+    assert str(item.url) == "https://www.bilibili.com/video/BV1VP7h6XEL5"
+    assert item.author == "极海Channel"
+    assert item.metadata["platform"] == "bilibili"
+    assert item.metadata["play"] == 18095
+    assert item.metadata["duration"] == "3:12"
+    assert item.metadata["keyword"] == "独立开发"
+    assert items[1].metadata["keyword"] == "AI工具"
+
+
+def test_bilibili_records_without_bvid_are_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_bili_search(
+        monkeypatch,
+        [
+            {"bvid": "", "title": "no bvid"},  # spread/ad entries lack a bvid
+            {"bvid": "BV1abc", "title": ""},  # missing title
+            _bilibili_video(),
+        ],
+    )
+
+    items = asyncio.run(_scraper(_bilibili_config()).fetch(SINCE))
+
+    assert len(items) == 2  # one valid record per keyword
+    assert all(item.id == "agent_reach:bilibili:BV1VP7h6XEL5" for item in items)
+
+
+def test_bilibili_no_keywords_returns_empty() -> None:
+    config = _bilibili_config(platform_overrides={"keywords": []})
+    assert asyncio.run(_scraper(config).fetch(SINCE)) == []
+
+
+def test_bilibili_cli_missing_degrades_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _missing(*args, **kwargs):
+        raise FileNotFoundError("bili")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _missing)
+    assert asyncio.run(_scraper(_bilibili_config()).fetch(SINCE)) == []
+
+
+def test_bilibili_subprocess_invocation_and_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real _run_bili_search path: subprocess output is parsed into records."""
+    calls = []
+
+    async def _fake_exec(*args, **kwargs):
+        calls.append(args)
+        payload = {"ok": True, "schema_version": "1", "data": [_bilibili_video()]}
+        return _FakeProc(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
+    items = asyncio.run(_scraper(_bilibili_config()).fetch(SINCE))
+
+    assert len(items) == 2
+    # bili search <keyword> --type video -n 5 --json
+    assert calls[0][:3] == ("bili", "search", "独立开发")
+    assert "--json" in calls[0]
+    assert calls[1][:3] == ("bili", "search", "AI工具")
+
+
+def test_bilibili_non_json_output_degrades_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_exec(*args, **kwargs):
+        return _FakeProc(b"<html>blocked</html>")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    assert asyncio.run(_scraper(_bilibili_config()).fetch(SINCE)) == []
+
+
+def test_bilibili_nonzero_exit_degrades_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_exec(*args, **kwargs):
+        return _FakeProc(b"", returncode=1)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    assert asyncio.run(_scraper(_bilibili_config()).fetch(SINCE)) == []
+
+
+def test_bilibili_not_ok_payload_degrades_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_exec(*args, **kwargs):
+        return _FakeProc(json.dumps({"ok": False, "data": None}).encode("utf-8"))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    assert asyncio.run(_scraper(_bilibili_config()).fetch(SINCE)) == []

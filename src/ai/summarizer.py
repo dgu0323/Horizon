@@ -18,6 +18,37 @@ _URL_SAFE_CHARS = ":/?#[]@!$&'*,;=~%+"
 # the digest; lower-scoring analyses stay in metadata but are not rendered.
 OPP_MIN_DISPLAY_SCORE = 4.0
 
+# Human-readable platform names for source lines and the run-overview block.
+SOURCE_DISPLAY_NAMES = {
+    "github": "GitHub",
+    "hackernews": "Hacker News",
+    "rss": "RSS",
+    "reddit": "Reddit",
+    "telegram": "Telegram",
+    "twitter": "Twitter/X",
+    "openbb": "OpenBB",
+    "ossinsight": "OSS Insight",
+    "gdelt": "GDELT",
+    "google_news": "Google News",
+    "agent_reach": "Agent-Reach",
+    "huggingface": "Hugging Face",
+}
+
+
+def _source_display_name(item: ContentItem) -> str:
+    """Concrete, human-readable source label for an item."""
+    meta = item.metadata
+    source = item.source_type.value
+    if source == "reddit" and meta.get("subreddit"):
+        return f"r/{meta['subreddit']}"
+    if source == "rss" and meta.get("feed_name"):
+        return str(meta["feed_name"])
+    if source == "agent_reach" and meta.get("platform"):
+        return str(meta["platform"]).upper()
+    if source == "google_news" and item.author:
+        return f"Google News · {item.author}"
+    return SOURCE_DISPLAY_NAMES.get(source, source)
+
 
 def _escape_markdown(value: object) -> str:
     """Render untrusted text literally while retaining its readable content."""
@@ -53,6 +84,9 @@ LABELS = {
     "en": {
         "header": "Horizon Daily",
         "source": "Source",
+        "original": "Original",
+        "run_overview": "Run overview",
+        "fetched_selected": "fetched {fetched} → selected {selected}",
         "background": "Background",
         "discussion": "Discussion",
         "references": "References",
@@ -82,6 +116,9 @@ LABELS = {
     "zh": {
         "header": "Horizon 每日速递",
         "source": "来源",
+        "original": "原文",
+        "run_overview": "运行概况",
+        "fetched_selected": "抓取 {fetched} → 入选 {selected}",
         "background": "背景",
         "discussion": "社区讨论",
         "references": "参考链接",
@@ -123,6 +160,7 @@ class DailySummarizer:
         date: str,
         total_fetched: int,
         language: str = "en",
+        source_stats: Optional[List[dict]] = None,
     ) -> str:
         """Generate daily summary in Markdown format.
 
@@ -133,6 +171,9 @@ class DailySummarizer:
             date: Date string (YYYY-MM-DD)
             total_fetched: Total number of items fetched before filtering
             language: Output language, either "en" or "zh"
+            source_stats: Optional per-platform dicts with keys
+                ``source`` / ``fetched`` / ``selected``, rendered as a
+                collapsible run-overview block
 
         Returns:
             str: Markdown formatted summary
@@ -145,8 +186,10 @@ class DailySummarizer:
         header = (
             f"# {labels['header']} - {date}\n\n"
             f"> {labels['selected_items'].format(total=total_fetched, selected=len(items))}\n\n"
-            "---\n\n"
         )
+        if source_stats:
+            header += self._format_run_overview(source_stats, labels) + "\n"
+        header += "---\n\n"
 
         # TOC
         toc_entries = []
@@ -244,15 +287,16 @@ class DailySummarizer:
             background = _pangu(background)
             discussion = _pangu(discussion)
 
-        # Source line with parts joined by " · ", link appended at end
-        source_type = item.source_type.value
-        source_parts = [_escape_markdown(source_type)]
-        if meta.get("subreddit"):
-            source_parts.append(_escape_markdown(f"r/{meta['subreddit']}"))
-        if meta.get("feed_name"):
-            source_parts.append(_escape_markdown(meta["feed_name"]))
-        else:
-            source_parts.append(_escape_markdown(item.author or "unknown"))
+        # Source line with parts joined by " · ", original/discussion links appended
+        source_parts = [_escape_markdown(_source_display_name(item))]
+        # Author is redundant when already folded into the display name
+        if (
+            item.author
+            and item.source_type.value != "google_news"
+            and not meta.get("subreddit")
+            and not meta.get("feed_name")
+        ):
+            source_parts.append(_escape_markdown(item.author))
         if item.published_at:
             if language == "zh":
                 source_parts.append(
@@ -262,6 +306,8 @@ class DailySummarizer:
             else:
                 day = item.published_at.strftime("%d").lstrip("0")
                 source_parts.append(item.published_at.strftime(f"%b {day}, %H:%M"))
+        if url:
+            source_parts.append(f'[{labels["original"]}]({url})')
         source_line = " \u00b7 ".join(source_parts)  # ·
 
         discussion_url = meta.get("discussion_url")
@@ -319,6 +365,26 @@ class DailySummarizer:
         lines.append("---")
 
         return "\n".join(lines) + "\n\n"
+
+    def _format_run_overview(self, source_stats: List[dict], labels: dict) -> str:
+        """Render the collapsible per-platform run-overview block."""
+        total_fetched = sum(s.get("fetched", 0) for s in source_stats)
+        total_selected = sum(s.get("selected", 0) for s in source_stats)
+        title = labels["fetched_selected"].format(
+            fetched=total_fetched, selected=total_selected
+        )
+        lines = [
+            f"<details><summary>📊 {labels['run_overview']}: {title}</summary>",
+            "",
+        ]
+        for stat in source_stats:
+            name = SOURCE_DISPLAY_NAMES.get(stat.get("source"), stat.get("source"))
+            line = labels["fetched_selected"].format(
+                fetched=stat.get("fetched", 0), selected=stat.get("selected", 0)
+            )
+            lines.append(f"- **{_escape_markdown(str(name))}**: {line}")
+        lines += ["", "</details>"]
+        return "\n".join(lines)
 
     def _format_opportunity(
         self, opportunity: Optional[dict], labels: dict, language: str

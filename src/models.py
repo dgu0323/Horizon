@@ -21,6 +21,7 @@ class SourceType(str, Enum):
     GDELT = "gdelt"
     GOOGLE_NEWS = "google_news"
     AGENT_REACH = "agent_reach"
+    HUGGINGFACE = "huggingface"
 
 
 class SourceDefinition(NamedTuple):
@@ -43,6 +44,7 @@ SOURCE_REGISTRY = {
     SourceType.GDELT.value: SourceDefinition("gdelt"),
     SourceType.GOOGLE_NEWS.value: SourceDefinition("google_news"),
     SourceType.AGENT_REACH.value: SourceDefinition("agent_reach", item_fields=("platforms",)),
+    SourceType.HUGGINGFACE.value: SourceDefinition("huggingface"),
 }
 
 
@@ -376,10 +378,11 @@ class GoogleNewsConfig(BaseModel):
 class AgentReachPlatformConfig(BaseModel):
     """Configuration for one platform fetched through Agent-Reach."""
 
-    name: str  # currently supported by the adapter: "v2ex", "xueqiu"
+    name: str  # currently supported by the adapter: "v2ex", "xueqiu", "bilibili"
     enabled: bool = True
     fetch_limit: int = 20
     nodes: List[str] = Field(default_factory=list)  # v2ex only: extra nodes to pull
+    keywords: List[str] = Field(default_factory=list)  # bilibili only: search keywords
     category: Optional[str] = None
 
 
@@ -387,11 +390,13 @@ class AgentReachConfig(BaseModel):
     """Agent-Reach adapter source configuration.
 
     Agent-Reach (https://github.com/.../Agent-Reach) is an optional access
-    layer for hard-to-reach platforms. Only its channels with a real Python
-    data API are used here: V2EX (public JSON API, no credentials) and
-    Xueqiu (public endpoints, optional login cookie). Other Agent-Reach
-    platforms (Twitter/X, Reddit, Xiaohongshu, Bilibili, ...) are driven by
-    external CLIs plus login cookies and are intentionally not wired in.
+    layer for hard-to-reach platforms. The channels used here are the ones
+    that work without login credentials: V2EX (public JSON API), Xueqiu
+    (public endpoints, optional login cookie), and Bilibili (via the
+    external ``bili`` CLI, ``pipx install bilibili-cli`` — search works
+    without login). Other Agent-Reach platforms (Twitter/X, Reddit,
+    Xiaohongshu, LinkedIn, ...) are driven by CLIs plus login cookies and
+    are intentionally not wired in.
 
     The `agent_reach` package is an optional dependency. If it is not
     importable, `agent_reach_path` (a local checkout of the Agent-Reach
@@ -402,6 +407,21 @@ class AgentReachConfig(BaseModel):
     enabled: bool = False
     agent_reach_path: Optional[str] = None  # local Agent-Reach repo checkout
     platforms: List[AgentReachPlatformConfig] = Field(default_factory=list)
+
+
+class HuggingFaceConfig(BaseModel):
+    """Hugging Face trending models/datasets source configuration.
+
+    Pulls trending items from the public Hugging Face API (no key
+    required) sorted by recent likes.
+    """
+
+    enabled: bool = False
+    fetch_models: bool = True
+    fetch_datasets: bool = True
+    limit: int = 15  # per endpoint
+    min_likes: int = 0
+    category: Optional[str] = None
 
 
 class SourcesConfig(BaseModel):
@@ -418,6 +438,7 @@ class SourcesConfig(BaseModel):
     gdelt: Optional[GDELTConfig] = None
     google_news: Optional[GoogleNewsConfig] = None
     agent_reach: Optional[AgentReachConfig] = None
+    huggingface: Optional[HuggingFaceConfig] = None
 
 
 class WebhookConfig(BaseModel):
@@ -523,6 +544,8 @@ class FilteringConfig(BaseModel):
     default_group_limit: Optional[int] = Field(default=None, gt=0)
     opportunity_enabled: bool = False  # run OpportunityAnalyzer pass after news analysis
     opportunity_min_news_score: float = 5.0  # only score opportunities for items at or above this news score
+    opportunity_digest_min_score: Optional[float] = None  # opportunity score granting digest entry regardless of news score
+    per_source_min_items: int = 0  # guaranteed top-N per source platform, regardless of score (0 = off)
 
 
 class Config(BaseModel):

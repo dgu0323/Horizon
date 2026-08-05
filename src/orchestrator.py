@@ -25,6 +25,7 @@ from .scrapers.ossinsight import OSSInsightScraper
 from .scrapers.gdelt import GDELTScraper
 from .scrapers.google_news import GoogleNewsScraper
 from .scrapers.agent_reach import AgentReachScraper
+from .scrapers.huggingface import HuggingFaceScraper
 from .ai.client import create_ai_client
 from .ai.analyzer import ContentAnalyzer
 from .ai.opportunity_analyzer import OpportunityAnalyzer
@@ -271,9 +272,13 @@ class HorizonOrchestrator:
             self.console.print(f"💾 Saved {len(important_items)} items to: {items_path}\n")
 
             # 7. Generate and save daily summaries for each configured language
+            source_stats = self._compute_source_stats(all_items, important_items)
             for lang in self.config.ai.languages:
                 summarizer = DailySummarizer()
-                summary = await summarizer.generate_summary(important_items, today, len(all_items), language=lang)
+                summary = await summarizer.generate_summary(
+                    important_items, today, len(all_items), language=lang,
+                    source_stats=source_stats,
+                )
 
                 # Save to data/summaries/
                 summary_path = self.storage.save_daily_summary(today, summary, language=lang)
@@ -447,6 +452,12 @@ class HorizonOrchestrator:
             if ar_cfg and ar_cfg.enabled:
                 ar_scraper = AgentReachScraper(ar_cfg, client)
                 tasks.append(self._fetch_with_progress("Agent-Reach", ar_scraper, since))
+
+            # Hugging Face trending models/datasets (key-less public API)
+            hf_cfg = getattr(self.config.sources, "huggingface", None)
+            if hf_cfg and hf_cfg.enabled:
+                hf_scraper = HuggingFaceScraper(hf_cfg, client)
+                tasks.append(self._fetch_with_progress("Hugging Face", hf_scraper, since))
 
             # Fetch all concurrently
             outcomes = await asyncio.gather(*tasks)
@@ -663,23 +674,77 @@ class HorizonOrchestrator:
         apply_balance: bool = True,
         log: bool = True,
     ) -> FilteringPipelineResult:
-        """Apply score thresholding, optional topic dedup, and digest balancing."""
+        """Apply score thresholding, optional topic dedup, and digest balancing.
+
+        Selection starts with items at or above the news-score threshold,
+        then adds two score-independent lanes:
+        - opportunity fast-track: items whose opportunity score reaches
+          ``filtering.opportunity_digest_min_score`` (when configured)
+        - per-source floor: top ``filtering.per_source_min_items`` items of
+          each source platform, however low their score
+        """
         effective_threshold = (
             threshold
             if threshold is not None
             else self.config.filtering.ai_score_threshold
         )
-        threshold_items = [
-            item
-            for item in items
-            if item.ai_score is not None and item.ai_score >= effective_threshold
-        ]
-        threshold_items.sort(key=lambda item: item.ai_score or 0, reverse=True)
+        filtering = self.config.filtering
+
+        selected_ids = set()
+        threshold_items = []
+        for item in items:
+            if item.ai_score is not None and item.ai_score >= effective_threshold:
+                selected_ids.add(item.id)
+                threshold_items.append(item)
 
         if log:
             self.console.print(
                 f"⭐️ {len(threshold_items)} items scored ≥ {effective_threshold}\n"
             )
+
+        # Opportunity fast-track: high opportunity score overrides a low news score
+        opp_min = filtering.opportunity_digest_min_score
+        if opp_min is not None:
+            fast_tracked = 0
+            for item in items:
+                if item.id in selected_ids:
+                    continue
+                opportunity = item.metadata.get("opportunity")
+                if not isinstance(opportunity, dict):
+                    continue
+                try:
+                    opp_score = float(opportunity.get("score"))
+                except (TypeError, ValueError):
+                    continue
+                if opp_score >= opp_min:
+                    selected_ids.add(item.id)
+                    threshold_items.append(item)
+                    fast_tracked += 1
+            if log and fast_tracked:
+                self.console.print(
+                    f"💡 {fast_tracked} items fast-tracked by opportunity score ≥ {opp_min}\n"
+                )
+
+        # Per-source floor: guarantee top-N per platform regardless of score
+        floor_n = filtering.per_source_min_items
+        if floor_n > 0:
+            by_source: Dict[str, List[ContentItem]] = defaultdict(list)
+            for item in items:
+                by_source[item.source_type.value].append(item)
+            floored = 0
+            for source_items in by_source.values():
+                source_items.sort(key=lambda item: item.ai_score or 0, reverse=True)
+                for item in source_items[:floor_n]:
+                    if item.id not in selected_ids:
+                        selected_ids.add(item.id)
+                        threshold_items.append(item)
+                        floored += 1
+            if log and floored:
+                self.console.print(
+                    f"🛟 {floored} items added by per-source floor (top {floor_n}/platform)\n"
+                )
+
+        threshold_items.sort(key=lambda item: item.ai_score or 0, reverse=True)
 
         deduped_items = threshold_items
         if topic_dedup and deduped_items:
@@ -887,6 +952,27 @@ class HorizonOrchestrator:
         enricher = ContentEnricher(ai_client)
         await enricher.enrich_batch(items)
         self.console.print(f"   Enriched {len(items)} items\n")
+
+    def _compute_source_stats(
+        self, all_items: List[ContentItem], selected_items: List[ContentItem]
+    ) -> List[dict]:
+        """Per-platform fetched/selected counts for the run-overview block."""
+        fetched_counts: Dict[str, int] = defaultdict(int)
+        for item in all_items:
+            fetched_counts[item.source_type.value] += 1
+        selected_counts: Dict[str, int] = defaultdict(int)
+        for item in selected_items:
+            selected_counts[item.source_type.value] += 1
+        stats = [
+            {
+                "source": source,
+                "fetched": fetched,
+                "selected": selected_counts.get(source, 0),
+            }
+            for source, fetched in fetched_counts.items()
+        ]
+        stats.sort(key=lambda s: s["fetched"], reverse=True)
+        return stats
 
     async def _analyze_content(self, items: List[ContentItem]) -> List[ContentItem]:
         """Analyze content items with AI.

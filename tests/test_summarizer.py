@@ -72,7 +72,7 @@ def test_generate_webhook_item_includes_discussion_link_when_distinct():
         total=1,
     )
 
-    assert "tester · Apr 25, 08:00 · [Discussion](https://news.ycombinator.com/item?id=1)" in result
+    assert "tester · Apr 25, 08:00 · [Original](https://example.com/items/1) · [Discussion](https://news.ycombinator.com/item?id=1)" in result
 
 
 def test_generate_webhook_item_omits_discussion_link_when_same_as_item_url():
@@ -119,7 +119,7 @@ def test_generate_summary_zh_uses_localized_selection_header_and_numeric_date():
     )
 
     assert "> 从 10 条内容中筛选出 1 条重要资讯。" in result
-    assert "rss · tester · 4月25日 08:00" in result
+    assert "RSS · tester · 4月25日 08:00" in result
     assert "From 10 items" not in result
     assert "Apr 25, 08:00" not in result
 
@@ -262,3 +262,51 @@ def test_summary_without_opportunity_metadata_is_unchanged():
 
     assert "Business Opportunity" not in result
     assert "商业机会" not in result
+
+
+def test_source_line_shows_display_name_and_original_link():
+    item = _make_item(1)  # RSS item without feed_name
+
+    result = _run_async(DailySummarizer().generate_summary([item], "2026-04-25", 1, language="zh"))
+
+    assert "RSS · tester" in result
+    assert "[原文](https://example.com/items/1)" in result
+
+
+def test_source_line_uses_subreddit_and_hn_display_names():
+    reddit_item = _make_item(1)
+    reddit_item.source_type = SourceType.REDDIT
+    reddit_item.metadata["subreddit"] = "SaaS"
+    hn_item = _make_item(2)
+    hn_item.source_type = SourceType.HACKERNEWS
+
+    result = _run_async(
+        DailySummarizer().generate_summary([reddit_item, hn_item], "2026-04-25", 2, language="zh")
+    )
+
+    assert "r/SaaS" in result
+    assert "Hacker News · tester" in result
+
+
+def test_run_overview_block_renders_per_platform_stats():
+    item = _make_item(1)
+    stats = [
+        {"source": "hackernews", "fetched": 49, "selected": 20},
+        {"source": "agent_reach", "fetched": 19, "selected": 1},
+    ]
+
+    result = _run_async(
+        DailySummarizer().generate_summary(
+            [item], "2026-04-25", 68, language="zh", source_stats=stats
+        )
+    )
+
+    assert "📊 运行概况: 抓取 68 → 入选 21" in result
+    assert "- **Hacker News**: 抓取 49 → 入选 20" in result
+    assert "- **Agent-Reach**: 抓取 19 → 入选 1" in result
+
+
+def test_run_overview_block_absent_without_stats():
+    result = _run_async(DailySummarizer().generate_summary([_make_item(1)], "2026-04-25", 1))
+
+    assert "运行概况" not in result

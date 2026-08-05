@@ -132,6 +132,7 @@ def test_mcp_filter_and_reporting_support_every_registered_source() -> None:
                 "gdelt": {"enabled": True},
                 "google_news": {"enabled": True},
                 "agent_reach": {"enabled": True, "platforms": [{"name": "v2ex"}]},
+                "huggingface": {"enabled": True},
             },
         }
     )
